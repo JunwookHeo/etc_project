@@ -1,0 +1,5 @@
+*.csv
+*.pdf
+.DS_Store
+./syntheic_data/archive
+
