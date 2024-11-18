@@ -6,7 +6,7 @@ from sdv.metadata import SingleTableMetadata
 from sdv.single_table import GaussianCopulaSynthesizer
 from sdv.single_table import CTGANSynthesizer
 
-SRC_PATH = "./syntheic_data/archive/*.csv"
+SRC_PATH = "./synthetic_data/archive/*.csv"
 
 def preprocessing(field):
     src_files = glob.glob(SRC_PATH)
@@ -32,6 +32,7 @@ def preprocessing(field):
 
 def train_synthetic_model(field):
     df = pd.read_csv(f'{field}.csv')
+    print(df)
     metadata = SingleTableMetadata()
     metadata.detect_from_dataframe(df)
     metadata.to_dict()

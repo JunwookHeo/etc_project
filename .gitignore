@@ -1,6 +1,7 @@
 *.csv
 *.pdf
 *.pkl
+*.h5
 .DS_Store
 ./syntheic_data/archive
 
