@@ -4,4 +4,5 @@
 *.h5
 .DS_Store
 ./syntheic_data/archive
+auggrid/
 
