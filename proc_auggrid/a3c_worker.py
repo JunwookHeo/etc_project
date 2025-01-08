@@ -183,7 +183,7 @@ import pandas as pd
 import os, math
 
 UPDATE_GLOBAL_ITER = 8
-GAMMA = 0.999
+GAMMA = 0.900
 MAX_EP = 3000
 
 ## Load test dataset
