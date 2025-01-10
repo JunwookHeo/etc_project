@@ -1,92 +1,6 @@
-"""
-Utils.py
-"""
-
 from torch import nn
 import torch
 import numpy as np
-
-
-def v_wrap(np_array, dtype=np.float32):
-    if np_array.dtype != dtype:
-        np_array = np_array.astype(dtype)
-    return torch.from_numpy(np_array)
-
-
-def set_init(layers):
-    for layer in layers:
-        nn.init.normal_(layer.weight, mean=0., std=0.1)
-        nn.init.constant_(layer.bias, 0.)
-
-
-def push_and_pull(opt, lnet, gnet, done, s_, bs, ba, br, gamma):
-    if done:
-        v_s_ = 0.               # terminal
-    else:
-        v_s_ = lnet.forward(v_wrap(s_[None, :]))[-1].data.numpy()[0, 0]
-
-    buffer_v_target = []
-    for r in br[::-1]:    # reverse buffer r
-        v_s_ = r + gamma * v_s_
-        buffer_v_target.append(v_s_)
-    buffer_v_target.reverse()
-
-    loss = lnet.loss_func(
-        v_wrap(np.vstack(bs)),
-        v_wrap(np.array(ba), dtype=np.int64) if ba[0].dtype == np.int64 else v_wrap(np.vstack(ba)),
-        v_wrap(np.array(buffer_v_target)[:, None]))
-
-    # calculate local gradients and push local parameters to global
-    opt.zero_grad()
-    loss.backward()
-        
-    for lp, gp in zip(lnet.parameters(), gnet.parameters()):
-        # lp.grad.data.clamp_(-1, 40)
-        gp._grad = lp.grad
-    opt.step()
-
-    # pull global parameters
-    lnet.load_state_dict(gnet.state_dict())
-
-
-def record(global_ep, global_ep_r, ep_r, res_queue, name):
-    with global_ep.get_lock():
-        global_ep.value += 1
-    with global_ep_r.get_lock():
-        if global_ep_r.value == 0.:
-            global_ep_r.value = ep_r
-        else:
-            global_ep_r.value = global_ep_r.value * 0.99 + ep_r * 0.01
-    res_queue.put(global_ep_r.value)
-    print(
-        name,
-        "Ep:", global_ep.value,
-        "| Ep_r: %.0f" % global_ep_r.value,
-    )
-
-
-"""
-Shared adam.py
-"""
-
-import torch
-
-
-class SharedAdam(torch.optim.Adam):
-    def __init__(self, params, lr=1e-3, betas=(0.9, 0.99), eps=1e-8,
-                 weight_decay=0):
-        super(SharedAdam, self).__init__(params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
-        # State initialization
-        for group in self.param_groups:
-            for p in group['params']:
-                state = self.state[p]
-                state['step'] = 0
-                state['exp_avg'] = torch.zeros_like(p.data)
-                state['exp_avg_sq'] = torch.zeros_like(p.data)
-
-                # share in memory
-                state['exp_avg'].share_memory_()
-                state['exp_avg_sq'].share_memory_()
 
 """
 Envronment:
@@ -109,9 +23,8 @@ class Environment:
 
     def reset(self):
         self.pos = 0
-        self.state = np.array([0., 0., 0., 0., self.btmin, 0., 0])
-        return self.state
-        # return torch.as_tensor(self.state, dtype=torch.float32).squeeze(0)
+        self.state = np.array([0., 0., 0., 0., self.btmin, 0., 0])        
+        return torch.as_tensor(self.state, dtype=torch.float32).squeeze(0)
 
     def step(self, action):
         charging = 0.0
@@ -127,13 +40,9 @@ class Environment:
             charging = max(0, self.state[0] - self.state[1])  # Charging power
             charging = min(self.btmax - self.state[4], charging)
             batt_state = charging # Update battery status
-            if self.state[0] > self.state[1]:
-                reward = 1.
         elif action == 0: # discharge battery
             discharging = min(max(self.state[4]-self.btmin, 0), max(0, self.state[1] - self.state[0])) # discharing power
             batt_state = -discharging # Update battery status
-            if self.state[0] < self.state[1]:
-                reward = 1.
             
         grid_state = self.state[1] - (self.state[0] - charging + discharging) # Grid power + : import, - : export
         cost = C_A*grid_state**2 + C_B*abs(grid_state) + C_C
@@ -148,9 +57,9 @@ class Environment:
         # d = abs(grid_state) / normal_v if normal_v else abs(grid_state)
         # reward = min(R_MAX, np.log(1/d)) if d else R_MAX
 
-        # normal_v2 = C_A*normal_v**2 + C_B*abs(normal_v)
-        # d = (abs(cost) - C_C) /normal_v2 if normal_v2 else (abs(cost) - C_C)
-        # reward = min(R_MAX, np.log(1/d)) if d else R_MAX
+        normal_v2 = C_A*normal_v**2 + C_B*abs(normal_v)
+        d = (abs(cost) - C_C) /normal_v2 if normal_v2 else (abs(cost) - C_C)
+        reward = min(R_MAX, np.log(1/d)) if d else R_MAX
                 
         self.state[2] = charging
         self.state[3] = discharging
@@ -158,14 +67,10 @@ class Environment:
         self.state[5] = grid_state
         self.state[6] = cost
 
-        done = True if ((self.pos+1) % TS == 0) else False
-        # done = True if (reward  > 0) else False
-        terminated = False if self.pos+1 < len(self.data_env) else True
-
-        # if done: 
+        done = ((self.pos+1) % TS == 0)
         self.pos += 1
         
-        return self.state, reward, done, terminated, self.pos-1
+        return torch.as_tensor(self.state, dtype=torch.float32), torch.tensor([reward]), done 
 
 
 """
@@ -183,87 +88,71 @@ import pandas as pd
 import os, math
 
 UPDATE_GLOBAL_ITER = 8
-GAMMA = 0.900
+GAMMA = 0.800
 MAX_EP = 3000
 
 ## Load test dataset
 TS = 48 # Time steps
-local_path = os.getcwd()
-if local_path.split('/')[-1] == 'etc_project':
-    local_path = os.path.join(local_path, 'proc_auggrid')
-df = pd.read_csv(os.path.join(local_path, 'AusGrid_preprocess.csv'), header=[0,1], index_col=0)
-df = df.set_index(pd.to_datetime(df.index))
-df.columns = df.columns.set_levels(df.columns.levels[0].astype('int64'), level=0)
-df = df/1000.
-df_date = df.index
 
-customers = sorted(df.columns.levels[0])
-data_train = []
-samples = list(range(201, 204)) 
+def load_train_data(local_path):    
+    df = pd.read_csv(os.path.join(local_path, 'AusGrid_preprocess.csv'), header=[0,1], index_col=0)
+    df = df.set_index(pd.to_datetime(df.index))
+    df.columns = df.columns.set_levels(df.columns.levels[0].astype('int64'), level=0)
+    df = df/1000.
+    df_date = df.index
 
-for s in samples:
-    train = df[s][['GG', 'GC']]
-    train['GC'].values[1]
-    print(train.shape)
-    data_train.append(train)
+    customers = sorted(df.columns.levels[0])
+    data_train = []
+    samples = list(range(201, 204)) 
 
+    for s in samples:
+        train = df[s][['GG', 'GC']]
+        train['GC'].values[1]
+        print('samples', train.shape)
+        data_train.append(train)
+
+    return data_train
+
+def load_test_data(local_path):
+    df = pd.read_csv(os.path.join(local_path, 'AusGrid_preprocess.csv'), header=[0,1], index_col=0)
+    df = df.set_index(pd.to_datetime(df.index))
+    df.columns = df.columns.set_levels(df.columns.levels[0].astype('int64'), level=0)
+    df = df/1000.
+    df_date = df.index
+    
+    customers = sorted(df.columns.levels[0])
+    data_test = df[1][['GG', 'GC']]
+    # data_test['GC'].values[1]
+    # data_test.shape
+    return data_test, df_date
+    
 # env = Environment()
 N_S = 7
 N_A = 2
 
-class Net(nn.Module):
+class a3c(nn.Module):
     def __init__(self, s_dim, a_dim):
-        super(Net, self).__init__()
+        super(a3c, self).__init__()
         self.s_dim = s_dim
         self.a_dim = a_dim
-        self.pi1 = nn.Linear(s_dim, 128)
-        self.pi2 = nn.Linear(128, 64)
-        self.pi3 = nn.Linear(64, a_dim)
-        self.tanh = nn.Tanh()
-        self.relu = nn.ReLU()
+        self.pi1 = nn.Linear(s_dim, 256)
+        self.pi2 = nn.Linear(256, 128)
+        self.pi3 = nn.Linear(128, a_dim)
         
-        self.v1 = nn.Linear(s_dim, 128)
-        self.v2 = nn.Linear(128, 64)
-        self.v3 = nn.Linear(64, 1)
-        set_init([self.pi1, self.pi2, self.pi3, self.v1, self.v2, self.v3])
-        self.distribution = torch.distributions.Categorical
+        self.v1 = nn.Linear(s_dim, 256)
+        self.v2 = nn.Linear(256, 128)
+        self.v3 = nn.Linear(128, 1)
+        # self.distribution = torch.distributions.Categorical
 
     def forward(self, x):
-        pi1 = torch.tanh(self.pi1(x))
-        # pi1 = self.relu(pi1)
-        pi2 = self.pi2(pi1)
-        # pi2 = self.relu(pi2)
-        logits = self.pi3(pi2)
-        # logits = self.tanh(logits)
-        
-        v1 = torch.tanh(self.v1(x))
-        # v1 = self.relu(v1)
-        v2 = self.v2(v1)
-        # v2 = self.relu(v2)
-        values = self.v3(v2)
-        return logits, values
-
-    def choose_action(self, s):
-        self.eval()
-        logits, _ = self.forward(s)
-        prob = F.softmax(logits, dim=1).data
-        m = self.distribution(prob)
-        return m.sample().numpy()[0]
-
-    def loss_func(self, s, a, v_t):
-        self.train()
-        logits, values = self.forward(s)
-        td = v_t - values
-        c_loss = td.pow(2) 
-        
-        probs = F.softmax(logits, dim=1)
-        m = self.distribution(probs)
-        exp_v = m.log_prob(a) * td.detach().squeeze()
-        a_loss = -exp_v
-        total_loss = c_loss.mean() + a_loss.mean()
-
-        return  total_loss
-
+        px = F.relu(self.pi1(x))
+        px = F.relu(self.pi2(px))
+        logits = F.softmax(self.pi3(px), dim=-1)
+                
+        vx = F.relu(self.v1(x))        
+        vx = F.relu(self.v2(vx))        
+        values = self.v3(vx)
+        return values, logits
 
 class Worker(mp.Process):
     def __init__(self, gnet, opt, global_ep, global_ep_r, res_queue, name, dataset):
@@ -272,86 +161,85 @@ class Worker(mp.Process):
         self.g_ep, self.g_ep_r, self.res_queue = global_ep, global_ep_r, res_queue
         self.gnet, self.opt = gnet, opt
         self.dataset = dataset
-        self.lnet = Net(N_S, N_A)           # local network
+        self.lnet = a3c(N_S, N_A)           # local network
         self.env = Environment(dataset, 50.)
         self.lnet.load_state_dict(gnet.state_dict())
 
     def run(self):
-        MAX_EP = len(self.dataset)//TS
-        s = self.env.reset()
-        
-        while True: #ep < MAX_EP:
-            buffer_s, buffer_a, buffer_r = [], [], []
-            ep_r = 0.    
-            total_step = 1
-            terminated = False
-            done = False
-            
-            while done==False:
-                a = self.lnet.choose_action(v_wrap(s[None, :]))
-                s_, r, done, terminated, pos = self.env.step(a)
-
-                # print('Action : ', a)
-                # if done:
-                ep_r += r
-            
-                buffer_a.append(a)
-                buffer_s.append(s)
-                buffer_r.append(r)
-                s = s_
-
-                if done or terminated:  # update global and assign to local net
-                    # sync
-                    push_and_pull(self.opt, self.lnet, self.gnet, done, s_, buffer_s, buffer_a, buffer_r, GAMMA)
-                    buffer_s, buffer_a, buffer_r = [], [], []
-
-                    if done or terminated:  # done and print information
-                        record(self.g_ep, self.g_ep_r, ep_r, self.res_queue, self.name)
-                        break
-                total_step += 1
-            # if ep_r > 0:  
-            if terminated:
-                break
-            
-        self.res_queue.put(None)
-        
-    def run2(self):
-        s = self.env.reset()
         MAX_EP = len(self.dataset)
+        state = self.env.reset()
+
+        all_lengths = []
+        average_lengths = []
+        all_rewards = []
+        entropy_term = 0
         
-        while self.g_ep.value < MAX_EP:
-            buffer_s, buffer_a, buffer_r = [], [], []
-            ep_r = 0.    
-            total_step = 1
+        log_probs = []
+        values = []
+        rewards = []
+        
+        self.lnet.load_state_dict(self.gnet.state_dict())
+        for i in range(MAX_EP):
+            value, logits = self.lnet.forward(state)
+            value = value.detach().numpy()[0]
+            dist = logits.detach().numpy()
+            action = np.random.choice(N_A, p=np.squeeze(dist))
+        
+            log_prob = torch.log(logits.squeeze(0)[action])
+            entropy = -np.sum(np.mean(dist) * np.log(dist))
+            new_state, reward, done = self.env.step(action)
+        
+            rewards.append(reward)
+            values.append(value)
+            log_probs.append(log_prob)
+            entropy_term += entropy
+            state = new_state
+    
+
+            if done:  # update global and assign to local net
+                Qval, _ = self.lnet.forward(new_state)
+                Qval = Qval.detach().numpy()[0]
+                all_rewards.append(np.sum(rewards))
+                self.res_queue.put(np.sum(rewards))
+                all_lengths.append(i)
+                average_lengths.append(np.mean(all_lengths[-10:]))
+                print("episode: {}, reward: {}, total length: {}, average length: {} \n".format(self.name, np.sum(rewards), i, average_lengths[-1]))
+
+                # compute Q values
+                Qvals = np.zeros_like(values)
+                for t in reversed(range(len(rewards))):
+                    Qval = rewards[t] + GAMMA * Qval
+                    Qvals[t] = Qval
+
+                #update actor critic
+                values = torch.FloatTensor(values)
+                Qvals = torch.FloatTensor(Qvals)
+                log_probs = torch.stack(log_probs)
+                
+                advantage = Qvals - values
+                actor_loss = (-log_probs * advantage).mean()
+                critic_loss = 0.5 * advantage.pow(2).mean()
+                ac_loss = actor_loss + critic_loss + 0.001 * entropy_term
+
+                self.opt.zero_grad()
+                ac_loss.backward()
+                for lp, gp in zip(self.lnet.parameters(), self.gnet.parameters()):
+                    gp._grad = lp.grad
+                self.opt.step()
+
+                self.lnet.load_state_dict(self.gnet.state_dict())
             
-            while True:
-                a = self.lnet.choose_action(v_wrap(s[None, :]))
-                s_, r, done = self.env.step(a, self.g_ep.value%MAX_EP)
-
-                if ep_r > 6: done = True                                
-                ep_r += r
-                buffer_a.append(a)
-                buffer_s.append(s)
-                buffer_r.append(r)
-
-                if total_step % UPDATE_GLOBAL_ITER == 0 or done:  # update global and assign to local net
-                    # sync
-                    push_and_pull(self.opt, self.lnet, self.gnet, done, s_, buffer_s, buffer_a, buffer_r, GAMMA)
-                    buffer_s, buffer_a, buffer_r = [], [], []
-
-                    if done:  # done and print information
-                        record(self.g_ep, self.g_ep_r, ep_r, self.res_queue, self.name)
-                        break
-                s = s_
-                total_step += 1
+                log_probs = []
+                values = []
+                rewards = []
+            
         self.res_queue.put(None)
-
-
-def test(net):
-    customers = sorted(df.columns.levels[0])
-    data_test = df[1][['GG', 'GC']]
-    data_test['GC'].values[1]
-    data_test.shape
+        
+def test(local_path, net):
+    # customers = sorted(df.columns.levels[0])
+    # data_test = df[1][['GG', 'GC']]
+    # data_test['GC'].values[1]
+    data_test, df_date = load_test_data(local_path)
 
     df_out = pd.DataFrame(columns=['PV', 'LD', 'PV.C', 'PV.D', 'BT', 'GD', 'COST', 'AC', 'RD'])
     MAX_EP = data_test.shape[0]
@@ -359,18 +247,16 @@ def test(net):
     env = Environment(data_test, 50.)
     
     with torch.no_grad():
-        s = env.reset()
+        state = env.reset()
         for i in range(MAX_EP):
-            # logits, _ = net.forward(v_wrap(s[None, :]))
-            # prob = F.softmax(logits, dim=1).data
-            # a = torch.argmax(prob, dim=1).numpy()[0]
-            a = net.choose_action(v_wrap(s[None, :]))
-            s_, r, done, _, _ = env.step(a)
+            _, logits = net.forward(state)
+            action = torch.argmax(logits.unsqueeze(0), dim=1).numpy()[0]
+            new_state, reward, done = env.step(action)
             # print('Action : ', a)
 
-            st = np.concatenate((s_, np.array([a-1, r])))
+            st = np.concatenate((new_state, np.array([action-1, reward.squeeze(0)])))
             df_out.loc[i] = st    
-            s = s_
+            state = new_state
 
     import matplotlib.pyplot as plt
 
@@ -404,34 +290,51 @@ def test(net):
 
         
 if __name__ == "__main__":
-    gnet = Net(N_S, N_A)        # global network
+    local_path = os.getcwd()
+    if local_path.split('/')[-1] == 'etc_project':
+        local_path = os.path.join(local_path, 'proc_auggrid')
+        
+    data_train = load_train_data(local_path)
+    
+    gnet = a3c(N_S, N_A)        # global network
     gnet.share_memory()         # share the global parameters in multiprocessing
-    opt = SharedAdam(gnet.parameters(), lr=1e-3, betas=(0.92, 0.999))      # global optimizer
+    opt = torch.optim.Adam(gnet.parameters(), lr=1e-4)
     
     MPATH = os.path.join(local_path, '__pycache__/a3c_gnet.pt')
     if os.path.exists(MPATH):
         gnet.load_state_dict(torch.load(MPATH))
 
-
-    global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
-
-    # parallel training
-    workers = [Worker(gnet, opt, global_ep, global_ep_r, res_queue, i, data_train[i]) for i in range(len(data_train))]
-    [w.start() for w in workers]
+    train_type = 'a3c'
     res = []                    # record episode reward to plot
-    while True:
-        r = res_queue.get()
-        if r is not None:
-            res.append(r)
-        else:
-            break
-    [w.join() for w in workers]
+    if train_type == 'a3c':
+        global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
 
-    torch.save(gnet.state_dict(), MPATH)
+        # parallel training
+        workers = [Worker(gnet, opt, global_ep, global_ep_r, res_queue, i, data_train[i]) for i in range(len(data_train))]
+        [w.start() for w in workers]
+        while True:
+            r = res_queue.get()
+            if r is not None:
+                res.append(r)
+            else:
+                break
+        [w.join() for w in workers]
 
-    # gnet.load_state_dict(torch.load(MPATH, weights_only=True))
+        torch.save(gnet.state_dict(), MPATH)
 
-    # test(gnet)
+    elif train_type == 'a2c':
+        global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
+
+        # parallel training
+        workers = [Worker(gnet, opt, global_ep, global_ep_r, res_queue, i, data_train[i]) for i in range(len(data_train))]
+        for w in workers:
+            w.run()
+
+        torch.save(gnet.state_dict(), MPATH)
+
+    gnet.load_state_dict(torch.load(MPATH, weights_only=True))
+
+    test(local_path, gnet)
 
     import matplotlib.pyplot as plt
     plt.plot(res)
