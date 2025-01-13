@@ -103,7 +103,7 @@ def load_train_data(local_path):
 
     customers = sorted(df.columns.levels[0])
     data_train = []
-    samples = list(range(201, 204)) 
+    samples = list(range(201, 205)) 
 
     for s in samples:
         train = df[s][['GG', 'GC']]
@@ -186,7 +186,7 @@ class Worker(mp.Process):
             action = np.random.choice(N_A, p=np.squeeze(dist))
         
             log_prob = torch.log(logits.squeeze(0)[action])
-            entropy = -np.sum(np.mean(dist) * np.log(dist))
+            entropy = -np.sum(dist * np.log(dist + 1e-10))
             new_state, reward, done = self.env.step(action)
         
             rewards.append(reward)
@@ -219,12 +219,12 @@ class Worker(mp.Process):
                 advantage = Qvals - values
                 actor_loss = (-log_probs * advantage).mean()
                 critic_loss = 0.5 * advantage.pow(2).mean()
-                ac_loss = actor_loss + critic_loss + 0.001 * entropy_term
+                ac_loss = actor_loss + critic_loss - 0.001 * entropy_term
 
                 self.opt.zero_grad()
                 ac_loss.backward()
                 for lp, gp in zip(self.lnet.parameters(), self.gnet.parameters()):
-                    gp._grad = lp.grad
+                    gp.grad = lp.grad
                 self.opt.step()
 
                 self.lnet.load_state_dict(self.gnet.state_dict())
@@ -334,7 +334,7 @@ if __name__ == "__main__":
 
     gnet.load_state_dict(torch.load(MPATH, weights_only=True))
 
-    test(local_path, gnet)
+    # test(local_path, gnet)
 
     import matplotlib.pyplot as plt
     plt.plot(res)
