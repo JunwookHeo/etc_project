@@ -40,26 +40,25 @@ class Environment:
             charging = max(0, self.state[0] - self.state[1])  # Charging power
             charging = min(self.btmax - self.state[4], charging)
             batt_state = charging # Update battery status
+            # if self.state[0] > self.state[1]:
+            #     reward = 1.0
         elif action == 0: # discharge battery
             discharging = min(max(self.state[4]-self.btmin, 0), max(0, self.state[1] - self.state[0])) # discharing power
             batt_state = -discharging # Update battery status
+            # if self.state[0] < self.state[1]:
+            #     reward = 1.
             
         grid_state = self.state[1] - (self.state[0] - charging + discharging) # Grid power + : import, - : export
         cost = C_A*grid_state**2 + C_B*abs(grid_state) + C_C
         cost = cost if grid_state > 0 else -cost
 
-        normal_v = abs(self.state[0] - self.state[1])
-        # lgc = self.state[0] - charging + discharging
-        lgc = self.state[1] - max(0, grid_state)
-        SC = lgc / self.state[0] if self.state[0] else 0
-        SS = lgc / self.state[1] if self.state[1] else 0
-        
-        # d = abs(grid_state) / normal_v if normal_v else abs(grid_state)
-        # reward = min(R_MAX, np.log(1/d)) if d else R_MAX
+        normal_v = abs(self.state[0] - self.state[1])       
+        d = abs(grid_state) / normal_v if normal_v else abs(grid_state)
+        reward = max((min(R_MAX, np.log(1/d)) if d else R_MAX), 0)
 
-        normal_v2 = C_A*normal_v**2 + C_B*abs(normal_v)
-        d = (abs(cost) - C_C) /normal_v2 if normal_v2 else (abs(cost) - C_C)
-        reward = min(R_MAX, np.log(1/d)) if d else R_MAX
+        # normal_v2 = C_A*normal_v**2 + C_B*abs(normal_v)
+        # d = (abs(cost) - C_C) /normal_v2 if normal_v2 else (abs(cost) - C_C)
+        # reward = min(R_MAX, np.log(1/d)) if d else R_MAX
                 
         self.state[2] = charging
         self.state[3] = discharging
@@ -103,7 +102,7 @@ def load_train_data(local_path):
 
     customers = sorted(df.columns.levels[0])
     data_train = []
-    samples = list(range(201, 205)) 
+    samples = list(range(201, 211)) 
 
     for s in samples:
         train = df[s][['GG', 'GC']]
@@ -177,6 +176,10 @@ class Worker(mp.Process):
         log_probs = []
         values = []
         rewards = []
+
+        total_export = 0.0
+        total_pv = 0.0
+        total_ld = 0.0
         
         self.lnet.load_state_dict(self.gnet.state_dict())
         for i in range(MAX_EP):
@@ -189,21 +192,24 @@ class Worker(mp.Process):
             entropy = -np.sum(dist * np.log(dist + 1e-10))
             new_state, reward, done = self.env.step(action)
         
-            rewards.append(reward)
+            rewards.append(reward.numpy())
             values.append(value)
             log_probs.append(log_prob)
             entropy_term += entropy
             state = new_state
-    
+
+            total_export += state.numpy()[5] if state.numpy()[5] < 0 else 0
+            total_pv += state.numpy()[0]
+            total_ld += state.numpy()[1]
 
             if done:  # update global and assign to local net
                 Qval, _ = self.lnet.forward(new_state)
                 Qval = Qval.detach().numpy()[0]
                 all_rewards.append(np.sum(rewards))
-                self.res_queue.put(np.sum(rewards))
+                self.res_queue.put({'Reward': np.sum(rewards)})
                 all_lengths.append(i)
                 average_lengths.append(np.mean(all_lengths[-10:]))
-                print("episode: {}, reward: {}, total length: {}, average length: {} \n".format(self.name, np.sum(rewards), i, average_lengths[-1]))
+                # print("episode: {}, reward: {}, total length: {}, average length: {} \n".format(self.name, np.sum(rewards), i, average_lengths[-1]))
 
                 # compute Q values
                 Qvals = np.zeros_like(values)
@@ -217,9 +223,9 @@ class Worker(mp.Process):
                 log_probs = torch.stack(log_probs)
                 
                 advantage = Qvals - values
-                actor_loss = (-log_probs * advantage).mean()
+                actor_loss = -(log_probs * advantage).mean()
                 critic_loss = 0.5 * advantage.pow(2).mean()
-                ac_loss = actor_loss + critic_loss - 0.001 * entropy_term
+                ac_loss = actor_loss + critic_loss - 0.01 * entropy_term
 
                 self.opt.zero_grad()
                 ac_loss.backward()
@@ -232,8 +238,13 @@ class Worker(mp.Process):
                 log_probs = []
                 values = []
                 rewards = []
-            
-        self.res_queue.put(None)
+
+        sc = (total_pv + total_export)/total_pv
+        ss = (total_pv + total_export)/total_ld
+        print('sc and ss of ', self.name, sc, ss)
+        self.res_queue.put({'SCSS':[sc, ss]})
+    
+        self.res_queue.put({'End':True})
         
 def test(local_path, net):
     # customers = sorted(df.columns.levels[0])
@@ -304,40 +315,42 @@ if __name__ == "__main__":
     if os.path.exists(MPATH):
         gnet.load_state_dict(torch.load(MPATH))
 
-    train_type = 'a3c'
     res = []                    # record episode reward to plot
-    if train_type == 'a3c':
-        global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
+    scss = []
+    global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
 
-        # parallel training
-        workers = [Worker(gnet, opt, global_ep, global_ep_r, res_queue, i, data_train[i]) for i in range(len(data_train))]
-        [w.start() for w in workers]
-        while True:
-            r = res_queue.get()
-            if r is not None:
-                res.append(r)
-            else:
-                break
-        [w.join() for w in workers]
+    # parallel training
+    workers = [Worker(gnet, opt, global_ep, global_ep_r, res_queue, i, data_train[i]) for i in range(len(data_train))]
+    [w.start() for w in workers]
+    running_workers = len(workers)
+    while running_workers > 0:
+        r = res_queue.get()
+        for k, v in r.items():
+            if k == 'Reward':
+                res.append(v)
+            elif k == 'SCSS':
+                print('SCSS', v)
+                scss.append(v)
+            elif k == 'End':
+                print('End')
+                running_workers -= 1
+                
+    [w.join() for w in workers]
 
-        torch.save(gnet.state_dict(), MPATH)
-
-    elif train_type == 'a2c':
-        global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
-
-        # parallel training
-        workers = [Worker(gnet, opt, global_ep, global_ep_r, res_queue, i, data_train[i]) for i in range(len(data_train))]
-        for w in workers:
-            w.run()
-
-        torch.save(gnet.state_dict(), MPATH)
+    torch.save(gnet.state_dict(), MPATH)
 
     gnet.load_state_dict(torch.load(MPATH, weights_only=True))
 
     # test(local_path, gnet)
 
     import matplotlib.pyplot as plt
+    plt.figure(figsize=(16, 4))
     plt.plot(res)
     plt.ylabel('Moving average ep reward')
     plt.xlabel('Step')
+    plt.show()
+
+    print(scss)
+    plt.plot(np.array(scss)[:, 0])
+    plt.plot(np.array(scss)[:, 1])
     plt.show()
