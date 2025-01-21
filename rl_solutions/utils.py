@@ -42,7 +42,8 @@ class ENV_BATT:
         
     def reset(self):
         self.ss = np.zeros(self.ss.shape)
-        
+
+        self.pos = 0        
         self.state = np.array([0., 0., 0., 0., self.btmin, 0., 0])
         return torch.as_tensor(self.state, dtype=torch.float32).squeeze(0)
 
