@@ -9,7 +9,7 @@ def load_data(samples, TS=48):
     df = pd.read_csv('AusGrid_preprocess.csv', header=[0,1], index_col=0)
     df = df.set_index(pd.to_datetime(df.index))
     df.columns = df.columns.set_levels(df.columns.levels[0].astype('int64'), level=0)
-    df = df/1000.
+    df = df/2000.
     df_date = df.index
     df.head()
 
@@ -28,7 +28,6 @@ def load_data(samples, TS=48):
 ################################################################################
 # BATTERY model Environment for RL
 ################################################################################
-
 class ENV_BATT:
     def __init__(self, data_env, capacity=50., horizon=48, maxsoc=0.95, minsoc=0.10):
         self.capacity = capacity
@@ -67,15 +66,18 @@ class ENV_BATT:
             batt_state = -discharging # Update battery status
 
         grid_state = self.state[1] - (self.state[0] - charging + discharging) # Grid power + : import, - : export
-        normal_v = abs(self.state[0] - self.state[1])        
-        # d = abs(grid_state) / normal_v if normal_v else abs(grid_state)
-        # reward = max((min(3, np.log(1/d)) if d else 3), 0)
+
+        C_A = 0.01
+        C_B = 1.
+        C_C = 0.
+        cost = C_A*grid_state**2 + C_B*abs(grid_state) + C_C
+        cost = cost if grid_state > 0 else -cost
                 
         self.state[2] = charging
         self.state[3] = discharging
         self.state[4] += batt_state
         self.state[5] = grid_state
-        self.state[6] = None
+        self.state[6] = cost
 
         self.ss[0][self.pos%self.horizon] = self.state[0]
         self.ss[1][self.pos%self.horizon] = self.state[1]
@@ -83,15 +85,7 @@ class ENV_BATT:
         self.ss[3][self.pos%self.horizon] = abs(grid_state) if grid_state < 0 else 0 # export to Grid
 
         sc = (self.ss[0].sum() - self.ss[3].sum())/self.ss[0].sum() if self.ss[0].sum() else 0
-        ss = (self.ss[0].sum() - self.ss[3].sum())/self.ss[1].sum() if self.ss[1].sum() else 0
-        # ss = (self.ss[1].sum() - self.ss[2].sum())/self.ss[1].sum() if self.ss[1].sum() else  -self.ss[3].sum()
-        # a_sc = self.ss[0].mean() - self.ss[3].mean()
-        # a_ss = self.ss[1].mean() - self.ss[2].mean()
-        # sc = sc/a_sc if a_sc > 0 else 0
-        # ss = ss/a_ss if a_ss > 0 else 0
-        # print(self.ss[0].sum(), self.ss[1].sum(), self.ss[2].sum(), self.ss[3].sum())
-
-        # reward = sigmoid(sc) + sigmoid(ss)
+        ss = (self.ss[1].sum() - self.ss[2].sum())/self.ss[1].sum() if self.ss[1].sum() else 0
         reward = wt*sc + (1-wt)*ss
 
         done = False
