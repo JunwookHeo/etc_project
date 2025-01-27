@@ -28,6 +28,11 @@ def load_data(samples, TS=48):
 ################################################################################
 # BATTERY model Environment for RL
 ################################################################################
+def normalize_2d(matrix):
+    norm = np.linalg.norm(matrix)
+    matrix = matrix/norm  # normalized matrix
+    return matrix
+
 class ENV_BATT:
     def __init__(self, data_env, capacity=50., horizon=48, maxsoc=0.95, minsoc=0.10):
         self.capacity = capacity
@@ -85,8 +90,13 @@ class ENV_BATT:
         self.ss[2][self.pos%self.horizon] = grid_state if grid_state > 0 else 0 # import from Grid
         self.ss[3][self.pos%self.horizon] = abs(grid_state) if grid_state < 0 else 0 # export to Grid
 
+        self.ss = normalize_2d(self.ss)
+        norm = abs(self.ss[0] - self.ss[1]).mean()
+        if norm == 0: norm = 1
+
         sc = (self.ss[0].sum() - self.ss[3].sum())/self.ss[0].sum() if self.ss[0].sum() else 0
         ss = (self.ss[1].sum() - self.ss[2].sum())/self.ss[1].sum() if self.ss[1].sum() else 0
+        reward2 = wt*sc/norm + (1-wt)*ss/norm
         reward = wt*sc + (1-wt)*ss
 
         done = False
