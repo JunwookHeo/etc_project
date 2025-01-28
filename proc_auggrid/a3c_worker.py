@@ -97,7 +97,7 @@ def load_train_data(local_path):
     df = pd.read_csv(os.path.join(local_path, 'AusGrid_preprocess.csv'), header=[0,1], index_col=0)
     df = df.set_index(pd.to_datetime(df.index))
     df.columns = df.columns.set_levels(df.columns.levels[0].astype('int64'), level=0)
-    df = df/1000.
+    df = df/2000.
     df_date = df.index
 
     customers = sorted(df.columns.levels[0])
@@ -116,7 +116,7 @@ def load_test_data(local_path):
     df = pd.read_csv(os.path.join(local_path, 'AusGrid_preprocess.csv'), header=[0,1], index_col=0)
     df = df.set_index(pd.to_datetime(df.index))
     df.columns = df.columns.set_levels(df.columns.levels[0].astype('int64'), level=0)
-    df = df/1000.
+    df = df/2000.
     df_date = df.index
     
     customers = sorted(df.columns.levels[0])

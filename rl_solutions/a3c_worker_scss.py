@@ -18,7 +18,8 @@ import utils
 TS = 48 # Time steps
 N_S = 7 # Number of observations
 N_A = 2 # Number of actions
-GAMMA = 0.9
+GAMMA = 0.8
+RL = 1e-4
 ##############################################################
 ## A3C network
 ##############################################################
@@ -56,97 +57,102 @@ class A3C(nn.Module):
 ## Worker of A3C
 ##############################################################
 class Worker(mp.Process):
-    def __init__(self, gnet, opt, global_ep, global_ep_r, res_queue, name, dataset):
+    def __init__(self, gnet, opt, global_ep, global_ep_r, res_queue, repeat, name, dataset):
         super(Worker, self).__init__()
         self.name = 'w%02i' % name
         self.g_ep, self.g_ep_r, self.res_queue = global_ep, global_ep_r, res_queue
         self.gnet, self.opt = gnet, opt
+        self.repeat = repeat
         self.dataset = dataset
         self.lnet = A3C(N_S, N_A)           # local network
         self.env = utils.ENV_BATT(dataset, 50.)
         self.lnet.load_state_dict(gnet.state_dict())
 
     def run(self):
-        MAX_EP = len(self.dataset)
-        state = self.env.reset()
+        for r in range(self.repeat):
+            MAX_EP = len(self.dataset)
+            state = self.env.reset()
 
-        all_lengths = []
-        average_lengths = []
-        all_rewards = []
-        entropy_term = 0
-        
-        log_probs = []
-        values = []
-        rewards = []
-
-        total_export = 0.0
-        total_pv = 0.0
-        total_ld = 0.0
-        
-        self.lnet.load_state_dict(self.gnet.state_dict())
+            all_lengths = []
+            average_lengths = []
+            all_rewards = []
+            entropy_term = 0
             
-        for i in range(MAX_EP):
-            value, logits = self.lnet.forward(state)
-            value = value.detach().numpy()[0]
-            dist = logits.detach().numpy()
-            action = np.random.choice(N_A, p=np.squeeze(dist))
-        
-            log_prob = torch.log(logits.squeeze(0)[action])
-            entropy = -np.sum(dist * np.log(dist + 1e-10))
-            new_state, reward, done = self.env.step(action)
-        
-            rewards.append(reward.numpy())
-            values.append(value)
-            log_probs.append(log_prob)
-            entropy_term += entropy
-            state = new_state
+            log_probs = []
+            values = []
+            rewards = []
 
-            total_export += state.numpy()[5] if state.numpy()[5] < 0 else 0
-            total_pv += state.numpy()[0]
-            total_ld += state.numpy()[1]
+            total_export = 0.0
+            total_pv = 0.0
+            total_ld = 0.0
+            
+            self.lnet.load_state_dict(self.gnet.state_dict())
 
-            # if done:  # update global and assign to local net
-            if (i + 1) % TS == 0:
-                Qval, _ = self.lnet.forward(new_state)
-                Qval = Qval.detach().numpy()[0]
-                all_rewards.append(np.sum(rewards))
-                self.res_queue.put({'Reward': np.sum(rewards)})
-                all_lengths.append(i)
-                average_lengths.append(np.mean(all_lengths[-10:]))
-                # print("episode: {}, reward: {}, total length: {}, average length: {} \n".format(self.name, np.sum(rewards), i, average_lengths[-1]))
+            for i in range(MAX_EP):
+                value, logits = self.lnet.forward(state)
+                value = value.detach().numpy()[0]
+                dist = logits.detach().numpy()
+                action = np.random.choice(N_A, p=np.squeeze(dist))
+            
+                log_prob = torch.log(logits.squeeze(0)[action])
+                entropy = -np.sum(dist * np.log(dist + 1e-16))
+                new_state, reward, done = self.env.step(action)
+            
+                rewards.append(reward.numpy())
+                values.append(value)
+                log_probs.append(log_prob)
+                entropy_term += entropy
+                state = new_state
 
-                # compute Q values
-                Qvals = np.zeros_like(values)
-                for t in reversed(range(len(rewards))):
-                    Qval = rewards[t] + GAMMA * Qval
-                    Qvals[t] = Qval
+                total_export += state.numpy()[5] if state.numpy()[5] < 0 else 0
+                total_pv += state.numpy()[0]
+                total_ld += state.numpy()[1]
 
-                #update actor critic
-                values = torch.FloatTensor(values)
-                Qvals = torch.FloatTensor(Qvals)
-                log_probs = torch.stack(log_probs)
-                
-                advantage = Qvals - values
-                actor_loss = -(log_probs * advantage).mean()
-                critic_loss = 0.5 * advantage.pow(2).mean()
-                ac_loss = actor_loss + critic_loss - 0.001 * entropy_term
+                # if done:  # update global and assign to local net
+                if (i + 1) % TS == 0:
+                    Qval, _ = self.lnet.forward(new_state)
+                    Qval = Qval.detach().numpy()[0]
+                    all_rewards.append(np.sum(rewards))
+                    self.res_queue.put({'Reward': np.sum(rewards)})
+                    all_lengths.append(i)
+                    average_lengths.append(np.mean(all_lengths[-10:]))
+                    # print("episode: {}, reward: {}, total length: {}, average length: {} \n".format(self.name, np.sum(rewards), i, average_lengths[-1]))
+
+                    # compute Q values
+                    Qvals = np.zeros_like(values)
+                    for t in reversed(range(len(rewards))):
+                        Qval = rewards[t] + GAMMA * Qval
+                        Qvals[t] = Qval
+
+                    #update actor critic
+                    values = torch.FloatTensor(values)
+                    Qvals = torch.FloatTensor(Qvals)
+                    log_probs = torch.stack(log_probs)
                     
-                self.opt.zero_grad()
-                ac_loss.backward()
-                for lp, gp in zip(self.lnet.parameters(), self.gnet.parameters()):
-                    gp.grad = lp.grad
-                self.opt.step()
+                    advantage = Qvals - values
+                    actor_loss = -(log_probs * advantage).mean()
+                    critic_loss = 0.5 * advantage.pow(2).mean()
+                    ac_loss = actor_loss + critic_loss - 0.001 * entropy_term
+                        
+                    self.opt.zero_grad()
+                    ac_loss.backward()
+                    for lp, gp in zip(self.lnet.parameters(), self.gnet.parameters()):
+                        if lp.grad == None:
+                            break
+                        gp.grad = lp.grad
+                        gp.grad.data.clamp_(-1, 1)
+                    self.opt.step()
 
-                self.lnet.load_state_dict(self.gnet.state_dict())
-            
-                log_probs = []
-                values = []
-                rewards = []
+                    self.lnet.load_state_dict(self.gnet.state_dict())
+                
+                    log_probs = []
+                    values = []
+                    rewards = []
 
-        sc = (total_pv + total_export)/total_pv
-        ss = (total_pv + total_export)/total_ld
-        print('sc and ss of ', self.name, sc, ss)
-        self.res_queue.put({'SCSS':[sc, ss]})
+            sc = (total_pv + total_export)/total_pv
+            ss = (total_pv + total_export)/total_ld
+            print(r, 'sc and ss of ', self.name, sc, ss)
+            self.res_queue.put({'SCSS':[sc, ss]})
     
         self.res_queue.put({'End':True})
         
@@ -200,9 +206,8 @@ def test(local_path, net):
 
     print(df_dis.loc[df_date.values[start_pos]:df_date.values[start_pos+duration]])
     plt.show()
-
-        
-if __name__ == "__main__":
+    
+def a3c_train():    
     local_path = os.getcwd()
     if local_path.split('/')[-1] == 'etc_project':
         local_path = os.path.join(local_path, 'rl_solutions')
@@ -212,7 +217,7 @@ if __name__ == "__main__":
     
     gnet = A3C(N_S, N_A)        # global network
     gnet.share_memory()         # share the global parameters in multiprocessing
-    opt = torch.optim.Adam(gnet.parameters(), lr=1e-5)
+    opt = torch.optim.Adam(gnet.parameters(), lr=RL)
     
     MPATH = os.path.join(local_path, '__pycache__/a3c_gnet.pt')
     # if os.path.exists(MPATH):
@@ -222,30 +227,32 @@ if __name__ == "__main__":
     scss = []
     global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
 
-    for repeat in range(10):
-        # parallel training
-        workers = [Worker(gnet, opt, global_ep, global_ep_r, res_queue, i, data_train[i]) for i in range(len(data_train))]
-        [w.start() for w in workers]
-        running_workers = len(workers)
-        while running_workers > 0:
-            try:
-                r = res_queue.get(timeout=60)
-                for k, v in r.items():
-                    if k == 'Reward':
-                        res.append(v)
-                    elif k == 'SCSS':
-                        print(repeat, v)
-                        scss.append(v)
-                    elif k == 'End':
-                        running_workers -= 1
-            except Exception as error:
-                print('Timeout error :', str(error))
-        [w.join() for w in workers]
+    
+    repeat = 100
+    # parallel training
+    workers = [Worker(gnet, opt, global_ep, global_ep_r, res_queue, repeat, i, data_train[i]) for i in range(len(data_train))]
+    [w.start() for w in workers]
+    running_workers = len(workers)
+    while running_workers > 0:
+        try:
+            r = res_queue.get(timeout=60)
+            for k, v in r.items():
+                if k == 'Reward':
+                    res.append(v)
+                elif k == 'SCSS':
+                    print(v)
+                    scss.append(v)
+                elif k == 'End':
+                    running_workers -= 1
+                    torch.save(gnet.state_dict(), MPATH)
+        except Exception as error:
+            print('Timeout error :', str(error))
+    [w.join() for w in workers]
 
-        print(repeat)
-
-        torch.save(gnet.state_dict(), MPATH)
-
+    torch.save(gnet.state_dict(), MPATH)
+    for sc in scss:
+        print(sc)
+        
     gnet.load_state_dict(torch.load(MPATH, weights_only=True))
 
     # test(local_path, gnet)
@@ -257,7 +264,75 @@ if __name__ == "__main__":
     plt.xlabel('Step')
     plt.show()
 
-    print(scss)
     plt.plot(np.array(scss)[:, 0])
     plt.plot(np.array(scss)[:, 1])
     plt.show()
+
+def a3c_train_sync():    
+    local_path = os.getcwd()
+    if local_path.split('/')[-1] == 'etc_project':
+        local_path = os.path.join(local_path, 'rl_solutions')
+
+    samples = list(range(201, 211)) #[201, 202, 203]
+    data_train, df_date = utils.load_data(os.path.join(local_path, 'AusGrid_preprocess.csv'), samples, TS)
+    
+    gnet = A3C(N_S, N_A)        # global network
+    gnet.share_memory()         # share the global parameters in multiprocessing
+    opt = torch.optim.Adam(gnet.parameters(), lr=RL)
+    
+    MPATH = os.path.join(local_path, '__pycache__/a3c_gnet.pt')
+    # if os.path.exists(MPATH):
+    #     gnet.load_state_dict(torch.load(MPATH))
+
+    res = []                    # record episode reward to plot
+    scss = []
+    global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
+
+    
+    repeat = 100
+
+    for i in range(len(data_train)):
+        worker = Worker(gnet, opt, global_ep, global_ep_r, res_queue, repeat, i, data_train[i])
+        worker.run()
+        done = False
+        while doen:
+            try:
+                r = res_queue.get(timeout=60)
+                for k, v in r.items():
+                    if k == 'Reward':
+                        res.append(v)
+                    elif k == 'SCSS':
+                        print(v)
+                        scss.append(v)
+                    elif k == 'End':
+                        done = True
+                        torch.save(gnet.state_dict(), MPATH)
+            except Exception as error:
+                print('Timeout error :', str(error))
+        
+    torch.save(gnet.state_dict(), MPATH)
+    for sc in scss:
+        print(sc)
+        
+    gnet.load_state_dict(torch.load(MPATH, weights_only=True))
+
+    # test(local_path, gnet)
+
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(16, 4))
+    plt.plot(res)
+    plt.ylabel('Moving average ep reward')
+    plt.xlabel('Step')
+    plt.show()
+
+    plt.plot(np.array(scss)[:, 0])
+    plt.plot(np.array(scss)[:, 1])
+    plt.show()
+
+
+if __name__ == "__main__":
+    from sys import platform
+    if platform == "linux" or platform == "linux2":
+        mp.set_start_method('spawn')
+
+    a3c_train_sync()
