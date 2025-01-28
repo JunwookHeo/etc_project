@@ -5,8 +5,8 @@ import torch
 ################################################################################
 # Load training/test data from csv
 ################################################################################
-def load_data(samples, TS=48):
-    df = pd.read_csv('AusGrid_preprocess.csv', header=[0,1], index_col=0)
+def load_data(path, samples, TS=48):
+    df = pd.read_csv(path, header=[0,1], index_col=0)
     df = df.set_index(pd.to_datetime(df.index))
     df.columns = df.columns.set_levels(df.columns.levels[0].astype('int64'), level=0)
     df = df/2000.
@@ -90,13 +90,13 @@ class ENV_BATT:
         self.ss[2][self.pos%self.horizon] = grid_state if grid_state > 0 else 0 # import from Grid
         self.ss[3][self.pos%self.horizon] = abs(grid_state) if grid_state < 0 else 0 # export to Grid
 
-        self.ss = normalize_2d(self.ss)
-        norm = abs(self.ss[0] - self.ss[1]).mean()
-        if norm == 0: norm = 1
+        # self.ss = normalize_2d(self.ss)
+        # norm = abs(self.ss[0] - self.ss[1]).mean()
+        # if norm == 0: norm = 1
 
         sc = (self.ss[0].sum() - self.ss[3].sum())/self.ss[0].sum() if self.ss[0].sum() else 0
         ss = (self.ss[1].sum() - self.ss[2].sum())/self.ss[1].sum() if self.ss[1].sum() else 0
-        reward2 = wt*sc/norm + (1-wt)*ss/norm
+        # reward2 = wt*sc/norm + (1-wt)*ss/norm
         reward = wt*sc + (1-wt)*ss
 
         done = False

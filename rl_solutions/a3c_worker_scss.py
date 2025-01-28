@@ -1,95 +1,3 @@
-from torch import nn
-import torch
-import numpy as np
-
-"""
-Envronment:
-"""
-BTMAX = 0.95
-BTMIN = 0.10
-C_A = 0.01
-C_B = 1.
-C_C = 0.
-R_MAX = 3.
-
-## Load test dataset
-TS = 48 # Time steps
-
-class Environment:
-    def __init__(self, data_env, capacity=50.):
-        self.capacity = capacity
-        self.data_env = data_env
-        self.btmax = capacity*BTMAX
-        self.btmin = capacity*BTMIN
-        self.pos = 0
-        self.state = np.array([self.data_env['GG'].values[0], self.data_env['GC'].values[0], 0., 0., self.btmin, 0., 0])
-        self.ss = np.zeros((4, TS)) #pv, ld, import, export
-        self.tss = 0.0
-
-    def reset(self):
-        self.ss = np.zeros(self.ss.shape)
-        self.tss = 0.0
-        
-        self.pos = 0
-        self.state = np.array([0., 0., 0., 0., self.btmin, 0., 0])        
-        return torch.as_tensor(self.state, dtype=torch.float32).squeeze(0)
-
-    def step(self, action):
-        charging = 0.0
-        discharging = 0.0
-        batt_state = 0.0
-        grid_state = 0.0
-        reward = 0.
-
-        self.state[0] = self.data_env['GG'].values[self.pos]  # PV generation power
-        self.state[1] = self.data_env['GC'].values[self.pos]  # Load consumption power
-        
-        if action == 1: # charge battery
-            charging = max(0, self.state[0] - self.state[1])  # Charging power
-            charging = min(self.btmax - self.state[4], charging)
-            batt_state = charging # Update battery status
-            # if self.state[0] > self.state[1]:
-            #     reward = 1.0
-        elif action == 0: # discharge battery
-            discharging = min(max(self.state[4]-self.btmin, 0), max(0, self.state[1] - self.state[0])) # discharing power
-            batt_state = -discharging # Update battery status
-            # if self.state[0] < self.state[1]:
-            #     reward = 1.
-            
-        grid_state = self.state[1] - (self.state[0] - charging + discharging) # Grid power + : import, - : export
-        cost = C_A*grid_state**2 + C_B*abs(grid_state) + C_C
-        cost = cost if grid_state > 0 else -cost
-
-        normal_v = abs(self.state[0] - self.state[1])       
-        d = abs(grid_state) / normal_v if normal_v else abs(grid_state)
-        reward = max((min(R_MAX, np.log(1/d)) if d else R_MAX), 0)
-
-        # normal_v2 = C_A*normal_v**2 + C_B*abs(normal_v)
-        # d = (abs(cost) - C_C) /normal_v2 if normal_v2 else (abs(cost) - C_C)
-        # reward = min(R_MAX, np.log(1/d)) if d else R_MAX
-                
-        self.state[2] = charging
-        self.state[3] = discharging
-        self.state[4] += batt_state
-        self.state[5] = grid_state
-        self.state[6] = cost
-
-        self.ss[0][self.pos%TS] = self.state[0]
-        self.ss[1][self.pos%TS] = self.state[1]
-        self.ss[2][self.pos%TS] = grid_state if grid_state > 0 else 0
-        self.ss[3][self.pos%TS] = grid_state if grid_state < 0 else 0
-
-        sc = (self.ss[0].sum() + self.ss[3].sum() - self.ss[4])/self.ss[0].sum() if self.ss[0].sum() else 0
-        ss = (self.ss[1].sum() - self.ss[2].sum() - self.ss[4])/self.ss[1].sum() if self.ss[1].sum() else 0
-
-        self.tss += ss        
-        reward = max(0, sc + ss)#/self.tss/(self.pos+1) if self.tss else 0
-        
-        done = ((self.pos+1) % TS == 0)
-        self.pos += 1
-        
-        return torch.as_tensor(self.state, dtype=torch.float32), torch.tensor([reward]), done 
-
 
 """
 Reinforcement Learning (A3C) using Pytroch + multiprocessing.
@@ -97,80 +5,56 @@ The most simple implementation for continuous action.
 
 View more on my Chinese tutorial page [莫烦Python](https://morvanzhou.github.io/).
 """
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
+
 import torch.multiprocessing as mp
-import pandas as pd
+import pandas as pd 
 import os, math
+import utils
 
-UPDATE_GLOBAL_ITER = 8
-GAMMA = 0.800
-MAX_EP = 3000
-
-
-
-def load_train_data(local_path):    
-    df = pd.read_csv(os.path.join(local_path, 'AusGrid_preprocess.csv'), header=[0,1], index_col=0)
-    df = df.set_index(pd.to_datetime(df.index))
-    df.columns = df.columns.set_levels(df.columns.levels[0].astype('int64'), level=0)
-    df = df/1000.
-    df_date = df.index
-
-    customers = sorted(df.columns.levels[0])
-    data_train = []
-    samples = list(range(201, 211)) 
-
-    for s in samples:
-        train = df[s][['GG', 'GC']]
-        train['GC'].values[1]
-        print('samples', train.shape)
-        data_train.append(train)
-
-    return data_train
-
-def load_test_data(local_path):
-    df = pd.read_csv(os.path.join(local_path, 'AusGrid_preprocess.csv'), header=[0,1], index_col=0)
-    df = df.set_index(pd.to_datetime(df.index))
-    df.columns = df.columns.set_levels(df.columns.levels[0].astype('int64'), level=0)
-    df = df/1000.
-    df_date = df.index
-    
-    customers = sorted(df.columns.levels[0])
-    data_test = df[1][['GG', 'GC']]
-    # data_test['GC'].values[1]
-    # data_test.shape
-    return data_test, df_date
-    
-# env = Environment()
-N_S = 7
-N_A = 2
-
-class a3c(nn.Module):
+TS = 48 # Time steps
+N_S = 7 # Number of observations
+N_A = 2 # Number of actions
+GAMMA = 0.9
+##############################################################
+## A3C network
+##############################################################
+class A3C(nn.Module):
     def __init__(self, s_dim, a_dim):
-        super(a3c, self).__init__()
+        super(A3C, self).__init__()
         self.s_dim = s_dim
         self.a_dim = a_dim
         self.pi1 = nn.Linear(s_dim, 256)
         self.pi2 = nn.Linear(256, 128)
-        self.pi3 = nn.Linear(128, a_dim)
+        # self.pi3 = nn.Linear(128, 64)
+        self.pif = nn.Linear(128, a_dim)
         
         self.v1 = nn.Linear(s_dim, 256)
         self.v2 = nn.Linear(256, 128)
-        self.v3 = nn.Linear(128, 1)
+        # self.v3 = nn.Linear(128, 64)
+        self.vf = nn.Linear(128, 1)
         # self.distribution = torch.distributions.Categorical
 
     def forward(self, x):
         px = F.relu(self.pi1(x))
         px = F.relu(self.pi2(px))
-        logits = F.softmax(self.pi3(px), dim=-1)
+        # px = F.relu(self.pi3(px))
+        logits = F.softmax(self.pif(px), dim=-1)
                 
         vx = F.relu(self.v1(x))        
-        vx = F.relu(self.v2(vx))        
-        values = self.v3(vx)
+        vx = F.relu(self.v2(vx))
+        # vx = F.relu(self.v3(vx))
+        values = self.vf(vx)
+        
         return values, logits
 
+
+##############################################################
+## Worker of A3C
+##############################################################
 class Worker(mp.Process):
     def __init__(self, gnet, opt, global_ep, global_ep_r, res_queue, name, dataset):
         super(Worker, self).__init__()
@@ -178,8 +62,8 @@ class Worker(mp.Process):
         self.g_ep, self.g_ep_r, self.res_queue = global_ep, global_ep_r, res_queue
         self.gnet, self.opt = gnet, opt
         self.dataset = dataset
-        self.lnet = a3c(N_S, N_A)           # local network
-        self.env = Environment(dataset, 50.)
+        self.lnet = A3C(N_S, N_A)           # local network
+        self.env = utils.ENV_BATT(dataset, 50.)
         self.lnet.load_state_dict(gnet.state_dict())
 
     def run(self):
@@ -221,7 +105,8 @@ class Worker(mp.Process):
             total_pv += state.numpy()[0]
             total_ld += state.numpy()[1]
 
-            if done:  # update global and assign to local net
+            # if done:  # update global and assign to local net
+            if (i + 1) % TS == 0:
                 Qval, _ = self.lnet.forward(new_state)
                 Qval = Qval.detach().numpy()[0]
                 all_rewards.append(np.sum(rewards))
@@ -244,7 +129,7 @@ class Worker(mp.Process):
                 advantage = Qvals - values
                 actor_loss = -(log_probs * advantage).mean()
                 critic_loss = 0.5 * advantage.pow(2).mean()
-                ac_loss = actor_loss + critic_loss - 0.01 * entropy_term
+                ac_loss = actor_loss + critic_loss - 0.001 * entropy_term
                     
                 self.opt.zero_grad()
                 ac_loss.backward()
@@ -266,15 +151,13 @@ class Worker(mp.Process):
         self.res_queue.put({'End':True})
         
 def test(local_path, net):
-    # customers = sorted(df.columns.levels[0])
-    # data_test = df[1][['GG', 'GC']]
-    # data_test['GC'].values[1]
-    data_test, df_date = load_test_data(local_path)
+    samples = [1]
+    data_test, df_date = utils.load_data(os.path.join(local_path, 'AusGrid_preprocess.csv'), samples, TS)
 
     df_out = pd.DataFrame(columns=['PV', 'LD', 'PV.C', 'PV.D', 'BT', 'GD', 'COST', 'AC', 'RD'])
     MAX_EP = data_test.shape[0]
 
-    env = Environment(data_test, 50.)
+    env = utils.ENV_BATT(data_test, 50.)
     
     with torch.no_grad():
         state = env.reset()
@@ -322,13 +205,14 @@ def test(local_path, net):
 if __name__ == "__main__":
     local_path = os.getcwd()
     if local_path.split('/')[-1] == 'etc_project':
-        local_path = os.path.join(local_path, 'proc_auggrid')
-        
-    data_train = load_train_data(local_path)
+        local_path = os.path.join(local_path, 'rl_solutions')
+
+    samples = list(range(201, 211)) #[201, 202, 203]
+    data_train, df_date = utils.load_data(os.path.join(local_path, 'AusGrid_preprocess.csv'), samples, TS)
     
-    gnet = a3c(N_S, N_A)        # global network
+    gnet = A3C(N_S, N_A)        # global network
     gnet.share_memory()         # share the global parameters in multiprocessing
-    opt = torch.optim.Adam(gnet.parameters(), lr=1e-4)
+    opt = torch.optim.Adam(gnet.parameters(), lr=1e-5)
     
     MPATH = os.path.join(local_path, '__pycache__/a3c_gnet.pt')
     # if os.path.exists(MPATH):
@@ -338,25 +222,29 @@ if __name__ == "__main__":
     scss = []
     global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
 
-    # parallel training
-    workers = [Worker(gnet, opt, global_ep, global_ep_r, res_queue, i, data_train[i]) for i in range(len(data_train))]
-    [w.start() for w in workers]
-    running_workers = len(workers)
-    while running_workers > 0:
-        r = res_queue.get()
-        for k, v in r.items():
-            if k == 'Reward':
-                res.append(v)
-            elif k == 'SCSS':
-                print('SCSS', v)
-                scss.append(v)
-            elif k == 'End':
-                print('End')
-                running_workers -= 1
-                
-    [w.join() for w in workers]
+    for repeat in range(10):
+        # parallel training
+        workers = [Worker(gnet, opt, global_ep, global_ep_r, res_queue, i, data_train[i]) for i in range(len(data_train))]
+        [w.start() for w in workers]
+        running_workers = len(workers)
+        while running_workers > 0:
+            try:
+                r = res_queue.get(timeout=60)
+                for k, v in r.items():
+                    if k == 'Reward':
+                        res.append(v)
+                    elif k == 'SCSS':
+                        print(repeat, v)
+                        scss.append(v)
+                    elif k == 'End':
+                        running_workers -= 1
+            except Exception as error:
+                print('Timeout error :', str(error))
+        [w.join() for w in workers]
 
-    torch.save(gnet.state_dict(), MPATH)
+        print(repeat)
+
+        torch.save(gnet.state_dict(), MPATH)
 
     gnet.load_state_dict(torch.load(MPATH, weights_only=True))
 
