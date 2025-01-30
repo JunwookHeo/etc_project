@@ -12,14 +12,14 @@ import numpy as np
 
 import torch.multiprocessing as mp
 import pandas as pd 
-import os, math
+import os, math, time
 import utils
 
 TS = 48 # Time steps
 N_S = 7 # Number of observations
 N_A = 2 # Number of actions
-GAMMA = 0.8
-RL = 1e-4
+GAMMA = 0.99
+RL = 1e-7
 ##############################################################
 ## A3C network
 ##############################################################
@@ -132,15 +132,16 @@ class Worker(mp.Process):
                     advantage = Qvals - values
                     actor_loss = -(log_probs * advantage).mean()
                     critic_loss = 0.5 * advantage.pow(2).mean()
-                    ac_loss = actor_loss + critic_loss - 0.001 * entropy_term
+                    ac_loss = actor_loss + critic_loss - 0.01 * entropy_term
+                    print(actor_loss.item(), critic_loss.item())
                         
                     self.opt.zero_grad()
                     ac_loss.backward()
                     for lp, gp in zip(self.lnet.parameters(), self.gnet.parameters()):
                         if lp.grad == None:
                             break
-                        gp.grad = lp.grad
-                        gp.grad.data.clamp_(-1, 1)
+                        gp._grad = lp.grad
+                        # gp.grad.data.clamp_(-1, 1)
                     self.opt.step()
 
                     self.lnet.load_state_dict(self.gnet.state_dict())
@@ -153,13 +154,15 @@ class Worker(mp.Process):
             ss = (total_pv + total_export)/total_ld
             print(r, 'sc and ss of ', self.name, sc, ss)
             self.res_queue.put({'SCSS':[sc, ss]})
+            time.sleep(1)
     
         self.res_queue.put({'End':True})
         
 def test(local_path, net):
     samples = [1]
     data_test, df_date = utils.load_data(os.path.join(local_path, 'AusGrid_preprocess.csv'), samples, TS)
-
+    data_test = data_test[0]
+    
     df_out = pd.DataFrame(columns=['PV', 'LD', 'PV.C', 'PV.D', 'BT', 'GD', 'COST', 'AC', 'RD'])
     MAX_EP = data_test.shape[0]
 
@@ -228,7 +231,7 @@ def a3c_train():
     global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
 
     
-    repeat = 100
+    repeat = 1
     # parallel training
     workers = [Worker(gnet, opt, global_ep, global_ep_r, res_queue, repeat, i, data_train[i]) for i in range(len(data_train))]
     [w.start() for w in workers]
@@ -289,26 +292,26 @@ def a3c_train_sync():
     global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
 
     
-    repeat = 100
-
-    for i in range(len(data_train)):
-        worker = Worker(gnet, opt, global_ep, global_ep_r, res_queue, repeat, i, data_train[i])
-        worker.run()
-        done = False
-        while doen:
-            try:
-                r = res_queue.get(timeout=60)
-                for k, v in r.items():
-                    if k == 'Reward':
-                        res.append(v)
-                    elif k == 'SCSS':
-                        print(v)
-                        scss.append(v)
-                    elif k == 'End':
-                        done = True
-                        torch.save(gnet.state_dict(), MPATH)
-            except Exception as error:
-                print('Timeout error :', str(error))
+    repeat = 10
+    for r in range(repeat):
+        for i in range(len(data_train)):
+            worker = Worker(gnet, opt, global_ep, global_ep_r, res_queue, 1, i, data_train[i])
+            worker.run()
+            done = False
+            while not done:
+                try:
+                    r = res_queue.get(timeout=60)
+                    for k, v in r.items():
+                        if k == 'Reward':
+                            res.append(v)
+                        elif k == 'SCSS':
+                            print(v)
+                            scss.append(v)
+                        elif k == 'End':
+                            done = True
+                            torch.save(gnet.state_dict(), MPATH)
+                except Exception as error:
+                    print('Timeout error :', str(error))
         
     torch.save(gnet.state_dict(), MPATH)
     for sc in scss:
@@ -316,7 +319,7 @@ def a3c_train_sync():
         
     gnet.load_state_dict(torch.load(MPATH, weights_only=True))
 
-    # test(local_path, gnet)
+    test(local_path, gnet)
 
     import matplotlib.pyplot as plt
     plt.figure(figsize=(16, 4))

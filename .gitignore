@@ -6,4 +6,5 @@
 ./syntheic_data/archive
 auggrid/
 __pycache__/
+runs/
 
