@@ -18,8 +18,8 @@ import utils
 TS = 48 # Time steps
 N_S = 7 # Number of observations
 N_A = 2 # Number of actions
-GAMMA = 0.99
-RL = 1e-7
+GAMMA = 0.9
+RL = 1e-6
 ##############################################################
 ## A3C network
 ##############################################################
@@ -132,16 +132,13 @@ class Worker(mp.Process):
                     advantage = Qvals - values
                     actor_loss = -(log_probs * advantage).mean()
                     critic_loss = 0.5 * advantage.pow(2).mean()
-                    ac_loss = actor_loss + critic_loss - 0.01 * entropy_term
+                    ac_loss = actor_loss + critic_loss - 1 * entropy_term
                     print(actor_loss.item(), critic_loss.item())
                         
                     self.opt.zero_grad()
                     ac_loss.backward()
                     for lp, gp in zip(self.lnet.parameters(), self.gnet.parameters()):
-                        if lp.grad == None:
-                            break
                         gp._grad = lp.grad
-                        # gp.grad.data.clamp_(-1, 1)
                     self.opt.step()
 
                     self.lnet.load_state_dict(self.gnet.state_dict())
@@ -290,9 +287,9 @@ def a3c_train_sync():
     res = []                    # record episode reward to plot
     scss = []
     global_ep, global_ep_r, res_queue = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
-
     
-    repeat = 10
+    repeat = 100
+    
     for r in range(repeat):
         for i in range(len(data_train)):
             worker = Worker(gnet, opt, global_ep, global_ep_r, res_queue, 1, i, data_train[i])
