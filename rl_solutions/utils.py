@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import math
 import torch
 
 ################################################################################
@@ -26,10 +27,23 @@ def load_data(path, samples, TS=48):
     return data_train, df_date
 
 ################################################################################
+# Calculate std deviation from daily usage 
+################################################################################
+def cal_stds(df, cmin=0.10, cmax=0.95):
+    df_daily = df.groupby(df.index.date).sum()
+    df_daily['Diff'] = df_daily['GG'] - df_daily['GC']
+    d_68 = df_daily['Diff'].mean()+1.0*df_daily['Diff'].std()
+    d_86 = df_daily['Diff'].mean()+1.5*df_daily['Diff'].std()
+    d_95 = df_daily['Diff'].mean()+2.0*df_daily['Diff'].std()
+    w = 0.1 + (1 - 0.95) + 1
+
+    return math.ceil(d_68*w), math.ceil(d_86*w), math.ceil(d_95*w)
+
+################################################################################
 # BATTERY model Environment for RL
 ################################################################################
 class ENV_BATT:
-    def __init__(self, data_env, capacity=50., horizon=48, maxsoc=0.95, minsoc=0.10):
+    def __init__(self, data_env, capacity=10., horizon=48, maxsoc=0.95, minsoc=0.10):
         self.capacity = capacity
         self.data_env = data_env
         self.pos = 0
