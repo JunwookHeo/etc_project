@@ -21,7 +21,7 @@ def load_data(path, samples, TS=48):
     for s in samples:
         train = df[s][['GG', 'GC']]
         train['GC'].values[1]
-        print(train.shape)
+        # print(train.shape)
         data_train.append(train)
 
     return data_train, df_date
@@ -35,9 +35,10 @@ def cal_stds(df, cmin=0.10, cmax=0.95):
     d_68 = df_daily['Diff'].mean()+1.0*df_daily['Diff'].std()
     d_86 = df_daily['Diff'].mean()+1.5*df_daily['Diff'].std()
     d_95 = df_daily['Diff'].mean()+2.0*df_daily['Diff'].std()
-    w = 0.1 + (1 - 0.95) + 1
+    d_plus = d_95 + (d_95 - d_86)
+    w = 1/(cmax - cmin)
 
-    return math.ceil(d_68*w), math.ceil(d_86*w), math.ceil(d_95*w)
+    return math.ceil(d_68*w), math.ceil(d_86*w), math.ceil(d_95*w), math.ceil(d_plus*w)
 
 ################################################################################
 # BATTERY model Environment for RL
