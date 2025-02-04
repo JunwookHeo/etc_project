@@ -19,10 +19,14 @@ def load_data(path, samples, TS=48):
     # samples = list(range(1, 2)) #[201, 202, 203]
 
     for s in samples:
-        train = df[s][['GG', 'GC']]
-        train['GC'].values[1]
-        # print(train.shape)
-        data_train.append(train)
+        try:
+            train = df[s][['GG', 'GC']]
+            train['GC'].values[1]
+            # print(train.shape)
+            data_train.append(train)
+        except:
+            print(s, "An exception occurred.")
+            data_train.append(pd.DataFrame())
 
     return data_train, df_date
 
@@ -35,10 +39,11 @@ def cal_stds(df, cmin=0.10, cmax=0.95):
     d_68 = df_daily['Diff'].mean()+1.0*df_daily['Diff'].std()
     d_86 = df_daily['Diff'].mean()+1.5*df_daily['Diff'].std()
     d_95 = df_daily['Diff'].mean()+2.0*df_daily['Diff'].std()
-    d_plus = d_95 + (d_95 - d_86)
+    d_99 = df_daily['Diff'].mean()+3.0*df_daily['Diff'].std()
+    
     w = 1/(cmax - cmin)
 
-    return math.ceil(d_68*w), math.ceil(d_86*w), math.ceil(d_95*w), math.ceil(d_plus*w)
+    return math.ceil(d_68*w), math.ceil(d_86*w), math.ceil(d_95*w), math.ceil(d_99*w)
 
 ################################################################################
 # BATTERY model Environment for RL
