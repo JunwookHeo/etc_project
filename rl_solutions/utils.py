@@ -36,14 +36,14 @@ def load_data(path, samples, TS=48):
 def cal_stds(df, cmin=0.10, cmax=0.95):
     df_daily = df.groupby(df.index.date).sum()
     df_daily['Diff'] = df_daily['GG'] - df_daily['GC']
-    d_68 = df_daily['Diff'].mean()+1.0*df_daily['Diff'].std()
-    d_86 = df_daily['Diff'].mean()+1.5*df_daily['Diff'].std()
-    d_95 = df_daily['Diff'].mean()+2.0*df_daily['Diff'].std()
-    d_99 = df_daily['Diff'].mean()+3.0*df_daily['Diff'].std()
+    d_10 = df_daily['Diff'].mean()+1.0*df_daily['Diff'].std()
+    d_15 = df_daily['Diff'].mean()+1.5*df_daily['Diff'].std()
+    d_20 = df_daily['Diff'].mean()+2.0*df_daily['Diff'].std()
+    d_30 = df_daily['Diff'].mean()+3.0*df_daily['Diff'].std()
     
     w = 1/(cmax - cmin)
 
-    return math.ceil(d_68*w), math.ceil(d_86*w), math.ceil(d_95*w), math.ceil(d_99*w)
+    return math.ceil(d_10*w), math.ceil(d_15*w), math.ceil(d_20*w), math.ceil(d_30*w)
 
 ################################################################################
 # BATTERY model Environment for RL
